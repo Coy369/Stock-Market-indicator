@@ -1,2 +1,270 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+import sys
+import threading
+import time
+import tkinter as tk
+from tkinter import ttk, messagebox
+import pandas as pd
+import yfinance as yf
+
+# 30 Dow Jones Industrial Average Tickers
+DOW_30_TICKERS = [
+    'GS', 'CAT', 'MSFT', 'AMGN', 'V', 'TRV', 'UNH', 'SHW', 'HD', 'AAPL',
+    'JPM', 'AXP', 'GOOGL', 'MCD', 'JNJ', 'AMZN', 'IBM', 'HON', 'CRM', 'CVX',
+    'NVDA', 'MMM', 'BA', 'PG', 'MRK', 'DIS', 'KO', 'CSCO', 'INTC', 'NKE'
+]
+
+class US30DashboardApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("US30 (Dow Jones) Momentum & Signal Dashboard")
+        self.root.geometry("1100x750")
+        self.root.configure(bg="#1e1e2e")
+
+        # Color Palette
+        self.BG_COLOR = "#1e1e2e"
+        self.CARD_BG = "#2b2b3b"
+        self.TEXT_COLOR = "#cdd6f4"
+        self.GREEN_COLOR = "#a6e3a1"
+        self.RED_COLOR = "#f38ba8"
+        self.YELLOW_COLOR = "#f9e2af"
+        self.ACCENT_BLUE = "#89b4fa"
+
+        self.setup_ui()
+        
+        # Start initial fetch in a background thread
+        self.is_fetching = False
+        self.trigger_refresh()
+
+    def setup_ui(self):
+        # 1. Header Frame
+        header_frame = tk.Frame(self.root, bg=self.BG_COLOR)
+        header_frame.pack(fill="x", padx=20, pady=15)
+
+        title_label = tk.Label(
+            header_frame, 
+            text="US30 REAL-TIME SIGNAL DASHBOARD", 
+            font=("Helvetica", 18, "bold"), 
+            bg=self.BG_COLOR, 
+            fg=self.TEXT_COLOR
+        )
+        title_label.pack(side="left")
+
+        self.refresh_btn = tk.Button(
+            header_frame, 
+            text="🔄 Refresh Data", 
+            command=self.trigger_refresh, 
+            font=("Helvetica", 11, "bold"), 
+            bg=self.ACCENT_BLUE, 
+            fg="#11111b", 
+            relief="flat", 
+            padx=15, pady=5, 
+            cursor="hand2"
+        )
+        self.refresh_btn.pack(side="right")
+
+        # 2. Main Signal Banner & Summary Cards
+        top_summary_frame = tk.Frame(self.root, bg=self.BG_COLOR)
+        top_summary_frame.pack(fill="x", padx=20, pady=10)
+
+        # Signal Banner Card
+        self.signal_card = tk.Frame(top_summary_frame, bg=self.CARD_BG, relief="groove", bd=2)
+        self.signal_card.pack(side="left", fill="both", expand=True, padx=5)
+
+        tk.Label(self.signal_card, text="TRADE SIGNAL", font=("Helvetica", 10, "bold"), bg=self.CARD_BG, fg=self.ACCENT_BLUE).pack(padx=10, pady=(10,2))
+        self.signal_label = tk.Label(self.signal_card, text="INITIALIZING...", font=("Helvetica", 16, "bold"), bg=self.CARD_BG, fg=self.YELLOW_COLOR)
+        self.signal_label.pack(padx=10, pady=(0,10))
+
+        # Index Weighted Power Card
+        self.power_card = tk.Frame(top_summary_frame, bg=self.CARD_BG, relief="groove", bd=2)
+        self.power_card.pack(side="left", fill="both", expand=True, padx=5)
+
+        tk.Label(self.power_card, text="WEIGHTED BULL POWER", font=("Helvetica", 10, "bold"), bg=self.CARD_BG, fg=self.ACCENT_BLUE).pack(padx=10, pady=(10,2))
+        self.power_label = tk.Label(self.power_card, text="0.00%", font=("Helvetica", 18, "bold"), bg=self.CARD_BG, fg=self.TEXT_COLOR)
+        self.power_label.pack(padx=10, pady=(0,2))
+
+        # Visual Meter (Canvas Progress Bar)
+        self.meter_canvas = tk.Canvas(self.power_card, height=12, bg="#45475a", highlightthickness=0)
+        self.meter_canvas.pack(fill="x", padx=15, pady=(0, 10))
+
+        # Heavyweight Status Card
+        self.hw_card = tk.Frame(top_summary_frame, bg=self.CARD_BG, relief="groove", bd=2)
+        self.hw_card.pack(side="left", fill="both", expand=True, padx=5)
+
+        tk.Label(self.hw_card, text="TOP 5 HEAVYWEIGHTS", font=("Helvetica", 10, "bold"), bg=self.CARD_BG, fg=self.ACCENT_BLUE).pack(padx=10, pady=(10,2))
+        self.hw_label = tk.Label(self.hw_card, text="0/5 Bullish", font=("Helvetica", 16, "bold"), bg=self.CARD_BG, fg=self.TEXT_COLOR)
+        self.hw_label.pack(padx=10, pady=(0,10))
+
+        # 3. Component Stocks Table (Treeview)
+        table_frame = tk.Frame(self.root, bg=self.BG_COLOR)
+        table_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
+        # Customizing Treeview Styling
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure(
+            "Treeview", 
+            background=self.CARD_BG, 
+            foreground=self.TEXT_COLOR, 
+            fieldbackground=self.CARD_BG, 
+            rowheight=26, 
+            font=("Helvetica", 10)
+        )
+        style.configure("Treeview.Heading", background="#313244", foreground=self.TEXT_COLOR, font=("Helvetica", 10, "bold"))
+        style.map("Treeview", background=[("selected", "#45475a")])
+
+        columns = ("ticker", "price", "rsi", "weight", "status")
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
+
+        self.tree.heading("ticker", text="Ticker")
+        self.tree.heading("price", text="Stock Price ($)")
+        self.tree.heading("rsi", text="RSI (14)")
+        self.tree.heading("weight", text="Index Weight (%)")
+        self.tree.heading("status", text="Trend Bias")
+
+        self.tree.column("ticker", anchor="center", width=100)
+        self.tree.column("price", anchor="e", width=150)
+        self.tree.column("rsi", anchor="center", width=120)
+        self.tree.column("weight", anchor="e", width=150)
+        self.tree.column("status", anchor="center", width=180)
+
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscroll=scrollbar.set)
+        
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Table Row Color Tags
+        self.tree.tag_configure("bullish", foreground=self.GREEN_COLOR)
+        self.tree.tag_configure("bearish", foreground=self.RED_COLOR)
+
+        # 4. Status Bar
+        self.status_bar = tk.Label(
+            self.root, 
+            text="System Ready.", 
+            bd=1, relief="sunken", anchor="w", 
+            font=("Helvetica", 9), bg="#11111b", fg="#a6adc8", padx=10, pady=3
+        )
+        self.status_bar.pack(side="bottom", fill="x")
+
+    def draw_meter(self, bull_power):
+        """Draws a visual sentiment bar (-100% to +100%)."""
+        self.meter_canvas.delete("all")
+        width = self.meter_canvas.winfo_width()
+        height = self.meter_canvas.winfo_height()
+        if width <= 1:
+            width = 200  # Fallback initial width
+
+        # Scale -100 to +100 to canvas width 0 to width
+        normalized = (bull_power + 100) / 200
+        fill_width = int(width * normalized)
+
+        bar_color = self.GREEN_COLOR if bull_power >= 0 else self.RED_COLOR
+        self.meter_canvas.create_rectangle(0, 0, fill_width, height, fill=bar_color, width=0)
+
+    def trigger_refresh(self):
+        if self.is_fetching:
+            return
+        self.is_fetching = True
+        self.refresh_btn.config(state="disabled", text="⏳ Loading...")
+        self.status_bar.config(text="Fetching latest US30 intraday market data from Yahoo Finance...")
+
+        # Run calculation in thread to avoid freezing UI
+        threading.Thread(target=self.fetch_and_calculate, daemon=True).start()
+
+    def fetch_and_calculate(self):
+        try:
+            # Download 5-minute intraday data
+            data = yf.download(DOW_30_TICKERS, period="2d", interval="5m", progress=False)
+            
+            analysis = []
+            total_index_price = 0
+            
+            for ticker in DOW_30_TICKERS:
+                df = data['Close'][ticker].dropna()
+                if len(df) < 20:
+                    continue
+                
+                last_price = float(df.iloc[-1])
+                ema20 = float(df.ewm(span=20).mean().iloc[-1])
+                
+                # RSI 14
+                delta = df.diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs = gain / loss
+                rsi = float((100 - (100 / (1 + rs))).iloc[-1])
+                
+                is_bullish = (last_price > ema20) and (rsi > 50)
+                total_index_price += last_price
+                
+                analysis.append({
+                    'ticker': ticker,
+                    'price': last_price,
+                    'rsi': rsi,
+                    'is_bullish': 1 if is_bullish else -1
+                })
+            
+            df_results = pd.DataFrame(analysis)
+            df_results['weight'] = (df_results['price'] / total_index_price) * 100
+            df_results['weighted_signal'] = (df_results['weight'] / 100) * df_results['is_bullish']
+            
+            # Metrics
+            us30_bull_power = df_results['weighted_signal'].sum() * 100
+            bullish_count = (df_results['is_bullish'] == 1).sum()
+            
+            top_5 = df_results.sort_values(by='price', ascending=False).head(5)
+            top_5_bullish = (top_5['is_bullish'] == 1).sum()
+
+            # Schedule UI update on main thread
+            self.root.after(0, self.update_ui, df_results, us30_bull_power, bullish_count, top_5_bullish)
+
+        except Exception as e:
+            self.root.after(0, self.handle_error, str(e))
+
+    def update_ui(self, df_results, us30_bull_power, bullish_count, top_5_bullish):
+        # Clear existing table rows
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        # Sort table by Index Weight descending
+        df_sorted = df_results.sort_values(by='weight', ascending=False)
+        
+        for _, row in df_sorted.iterrows():
+            status_text = "🟢 Bullish" if row['is_bullish'] == 1 else "🔴 Bearish"
+            tag = "bullish" if row['is_bullish'] == 1 else "bearish"
+            
+            self.tree.insert("", "end", values=(
+                row['ticker'],
+                f"${row['price']:.2f}",
+                f"{row['rsi']:.1f}",
+                f"{row['weight']:.2f}%",
+                status_text
+            ), tags=(tag,))
+
+        # Update Summary Labels
+        self.power_label.config(text=f"{us30_bull_power:+.2f}%")
+        self.draw_meter(us30_bull_power)
+        self.hw_label.config(text=f"{top_5_bullish}/5 Bullish")
+
+        # Signal Logic Banner
+        if us30_bull_power >= 45.0 and top_5_bullish >= 4 and bullish_count >= 18:
+            self.signal_label.config(text="🟢 STRONG BUY SIGNAL", fg=self.GREEN_COLOR)
+        elif us30_bull_power <= -45.0 and top_5_bullish <= 1 and bullish_count <= 12:
+            self.signal_label.config(text="🔴 STRONG SELL SIGNAL", fg=self.RED_COLOR)
+        else:
+            self.signal_label.config(text="🟡 NO CLEAR SIGNAL (NEUTRAL)", fg=self.YELLOW_COLOR)
+
+        self.status_bar.config(text=f"Last updated: {time.strftime('%H:%M:%S')} | Total Market Breadth: {bullish_count}/30 Stocks Bullish")
+        self.refresh_btn.config(state="normal", text="🔄 Refresh Data")
+        self.is_fetching = False
+
+    def handle_error(self, error_msg):
+        messagebox.showerror("Data Error", f"Failed to fetch market data:\n{error_msg}")
+        self.status_bar.config(text="Error fetching data.")
+        self.refresh_btn.config(state="normal", text="🔄 Refresh Data")
+        self.is_fetching = False
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = US30DashboardApp(root)
+    root.mainloop()
